@@ -53,7 +53,7 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 		{Hash: "hash-1", Size: 1, Modality: img},
 		{Hash: "hash-2", Size: 1, Modality: img},
 	}
-	producer.recordItemLookups(items)
+	producer.matchItems(items, nil)
 
 	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))
 	assert.Equal(t, initialHits, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey, img)))
@@ -65,7 +65,7 @@ func TestRecordItemLookupsMetrics(t *testing.T) {
 		{Hash: "hash-1", Size: 1, Modality: img}, // Hit
 		{Hash: "hash-3", Size: 1, Modality: img}, // Miss
 	}
-	producer.recordItemLookups(items)
+	producer.matchItems(items, nil)
 
 	assert.Equal(t, initialQueries+4, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))
 	assert.Equal(t, initialHits+1, testutil.ToFloat64(encoderCacheHitsTotal.WithLabelValues(ProducerType, testName, podKey, img)))
@@ -77,7 +77,7 @@ func TestDeletedPodHitSeriesRemoved(t *testing.T) {
 	producer := newTestProducer(t, nil, nil)
 	img := string(reqcommon.ModalityImage)
 	producer.putCacheEntry("hash-1", podA, podB)
-	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
+	producer.matchItems([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}}, nil)
 
 	require.NoError(t, producer.Extract(context.Background(), fwkdl.EndpointEvent{
 		Type:     fwkdl.EventDelete,
@@ -96,7 +96,7 @@ func TestStalePodHitSeriesRemoved(t *testing.T) {
 	producer := newTestProducer(t, nil, func() []k8stypes.NamespacedName { return []k8stypes.NamespacedName{podA} })
 	img := string(reqcommon.ModalityImage)
 	producer.putCacheEntry("hash-1", podA, podB)
-	producer.recordItemLookups([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}})
+	producer.matchItems([]attrmm.MatchItem{{Hash: "hash-1", Size: 1, Modality: img}}, nil)
 
 	producer.removeStalePods()
 
@@ -140,7 +140,6 @@ func TestProduceRecordsMetrics(t *testing.T) {
 
 	initialQueries := testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img))
 
-	// Produce should call recordItemLookups
 	require.NoError(t, producer.Produce(context.Background(), request, nil))
 
 	assert.Equal(t, initialQueries+2, testutil.ToFloat64(encoderCacheQueriesTotal.WithLabelValues(ProducerType, testName, img)))

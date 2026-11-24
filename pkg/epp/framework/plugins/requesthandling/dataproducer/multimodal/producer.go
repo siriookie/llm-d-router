@@ -303,17 +303,17 @@ func (p *Producer) Produce(ctx context.Context, request *scheduling.InferenceReq
 		return nil
 	}
 
-	p.recordItemLookups(requestItems)
+	matches := p.matchItems(requestItems, endpoints)
 
 	if request != nil && request.RequestID != "" {
 		p.pluginState.Write(request.RequestID, plugin.StateKey(ProducerType), &requestState{items: requestItems})
 	}
-	for _, endpoint := range endpoints {
+	for i, endpoint := range endpoints {
 		metadata := endpoint.GetMetadata()
 		if metadata == nil {
 			continue
 		}
-		matchedItems := p.matchedItemsForPod(metadata.ID.String(), requestItems)
+		matchedItems := matches[i]
 		p.recordHitRatio(len(matchedItems), len(requestItems))
 		endpoint.Put(p.dk, attrmm.NewEncoderCacheMatchInfo(
 			matchedItems,
@@ -434,34 +434,50 @@ func (c *itemCollector) add(hash, modality string, size int) {
 	c.items = append(c.items, attrmm.MatchItem{Hash: hash, Size: size, Modality: modality})
 }
 
-func itemSlice(itemsByHash map[string]attrmm.MatchItem) []attrmm.MatchItem {
-	if len(itemsByHash) == 0 {
-		return nil
-	}
-	items := make([]attrmm.MatchItem, 0, len(itemsByHash))
-	for _, item := range itemsByHash {
-		items = append(items, item)
-	}
-	return items
-}
-
-// recordItemLookups increments the queries counter for each item and, for every
-// endpoint whose cache contains the hash, increments that endpoint's hits counter.
+// matchItems reuses the cache lookups for metrics to collect candidate matches.
+// Metrics cover all tracked pods. Items are deduplicated by ExtractMMItems.
 // The modality label goes through mmobs.MetricLabel because a token-in request
 // names its own modalities.
-func (p *Producer) recordItemLookups(items []attrmm.MatchItem) {
+func (p *Producer) matchItems(items []attrmm.MatchItem, endpoints []scheduling.Endpoint) [][]attrmm.MatchItem {
 	p.mutex.RLock()
 	defer p.mutex.RUnlock()
-	pluginType, pluginName := p.typedName.Type, p.typedName.Name
-	for _, item := range items {
-		modality := mmobs.MetricLabel(item.Modality)
-		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, modality).Inc()
-		for pod, podCache := range p.caches {
-			if podCache.contains(item.Hash) {
-				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, modality).Inc()
+	candidateCaches := make([]*podCache, len(endpoints))
+	matchesByCache := make(map[*podCache][]attrmm.MatchItem, len(endpoints))
+	for i, endpoint := range endpoints {
+		if metadata := endpoint.GetMetadata(); metadata != nil {
+			if cache := p.caches[metadata.ID.String()]; cache != nil {
+				candidateCaches[i] = cache
+				matchesByCache[cache] = nil
 			}
 		}
 	}
+	pluginType, pluginName := p.typedName.Type, p.typedName.Name
+	modalities := make([]string, len(items))
+	for i, item := range items {
+		modalities[i] = mmobs.MetricLabel(item.Modality)
+		encoderCacheQueriesTotal.WithLabelValues(pluginType, pluginName, modalities[i]).Inc()
+	}
+	var matched []attrmm.MatchItem
+	for pod, podCache := range p.caches {
+		_, collect := matchesByCache[podCache]
+		matched = matched[:0]
+		for i, item := range items {
+			if podCache.contains(item.Hash) {
+				encoderCacheHitsTotal.WithLabelValues(pluginType, pluginName, pod, modalities[i]).Inc()
+				if collect {
+					matched = append(matched, item)
+				}
+			}
+		}
+		if len(matched) > 0 {
+			matchesByCache[podCache] = attrmm.CloneMatchItems(matched)
+		}
+	}
+	matches := make([][]attrmm.MatchItem, len(endpoints))
+	for i, cache := range candidateCaches {
+		matches[i] = matchesByCache[cache]
+	}
+	return matches
 }
 
 // recordHitRatio observes the fraction of a request's multimodal items that
@@ -473,22 +489,6 @@ func (p *Producer) recordHitRatio(matchedItems, totalItems int) {
 	}
 	ratio := float64(matchedItems) / float64(totalItems)
 	encoderCacheHitRatio.WithLabelValues(p.typedName.Type, p.typedName.Name).Observe(ratio)
-}
-
-func (p *Producer) matchedItemsForPod(pod string, requestItems []attrmm.MatchItem) []attrmm.MatchItem {
-	p.mutex.RLock()
-	defer p.mutex.RUnlock()
-	podCache, ok := p.caches[pod]
-	if !ok {
-		return nil
-	}
-	matchedItemsByHash := map[string]attrmm.MatchItem{}
-	for _, item := range requestItems {
-		if podCache.contains(item.Hash) {
-			matchedItemsByHash[item.Hash] = item
-		}
-	}
-	return itemSlice(matchedItemsByHash)
 }
 
 func (p *Producer) removeStalePods() {
